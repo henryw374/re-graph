@@ -3,14 +3,36 @@
             [re-frame.interceptor :refer [->interceptor get-coeffect assoc-coeffect update-coeffect enqueue]]
             [re-frame.std-interceptors :as rfi]
             [re-frame.interop :refer [empty-queue]]
-            [cljs-http.client :as http]
-            [cljs.core.async :as a])
-  (:require-macros [cljs.core.async.macros :refer [go]]))
+            #?(:cljs [cljs-http.client :as http]
+               :clj  [clj-http.client :as http])
+            #?(:cljs [clojure.core.async :as a]
+               :clj [clojure.core.async :refer [go] :as a ])
+            )
+  #?(:cljs (:require-macros [cljs.core.async.macros :refer [go]])))
 
 (def default-instance-name ::default)
 
 (defn- cons-interceptor [ctx interceptor]
   (update ctx :queue #(into (into empty-queue [interceptor]) %)))
+
+(def log #?(:cljs js/console.error
+            :clj println))
+
+(defn cljc->js [& args]
+  #?(:cljs (apply clj->js args)
+     :clj c))
+
+(defn js->cljc [& args]
+  #?(:cljs (apply js->clj args)
+     :clj js-obj))
+
+(defn json->string [js-obj]
+  #?(:cljs (js/JSON.stringify js-obj)
+     :cljs js-obj))
+
+(defn string->json [s]
+  #?(:cljs (js/JSON.parse s)
+     :clj s))
 
 (def re-graph-instance
   (->interceptor
@@ -31,7 +53,7 @@
                      (cons-interceptor (rfi/path :re-graph instance-name))
                      (assoc-coeffect :event trimmed-event))
 
-                 (do (js/console.error "No default instance of re-graph found but no valid instance name was provided. Valid instance names are:" (keys re-graph)
+                 (do (log "No default instance of re-graph found but no valid instance name was provided. Valid instance names are:" (keys re-graph)
                                        "but was provided with" provided-instance-name
                                        "handling event" event-name)
                      ctx))))))
@@ -73,7 +95,7 @@
 (re-frame/reg-fx
  ::send-ws
  (fn [[websocket payload]]
-   (.send websocket (js/JSON.stringify (clj->js payload)))))
+   (.send websocket (json->string (cljc->js payload)))))
 
 (re-frame/reg-fx
  ::call-callback
@@ -91,7 +113,7 @@
  (fn [{:keys [db] :as cofx} [subscription-id payload :as event]]
    (if-let [callback-event (get-in db [:subscriptions (name subscription-id) :callback])]
      {:dispatch (conj callback-event payload)}
-     (js/console.debug "No callback-event found for subscription" subscription-id))))
+     (log "No callback-event found for subscription" subscription-id))))
 
 (re-frame/reg-event-db
  ::on-ws-complete
@@ -147,18 +169,18 @@
 
 (defn- on-ws-message [instance-name]
   (fn [m]
-    (let [data (js/JSON.parse (aget m "data"))]
+    (let [data (string->json (aget m "data"))]
       (condp = (aget data "type")
         "data"
-        (re-frame/dispatch [::on-ws-data instance-name (aget data "id") (js->clj (aget data "payload") :keywordize-keys true)])
+        (re-frame/dispatch [::on-ws-data instance-name (aget data "id") (js->cljc (aget data "payload") :keywordize-keys true)])
 
         "complete"
         (re-frame/dispatch [::on-ws-complete instance-name (aget data "id")])
 
         "error"
-        (js/console.warn (str "GraphQL error for " instance-name " - " (aget data "id") ": " (aget data "payload" "message")))
+        (log (str "GraphQL error for " instance-name " - " (aget data "id") ": " (aget data "payload" "message")))
 
-        (js/console.debug "Ignoring graphql-ws event " instance-name " - " (aget data "type"))))))
+        (log "Ignoring graphql-ws event " instance-name " - " (aget data "type"))))))
 
 (defn- on-open [instance-name ws]
   (fn [e]
@@ -170,7 +192,7 @@
 
 (defn- on-error [instance-name]
   (fn [e]
-    (js/console.warn "GraphQL websocket error" instance-name e)))
+    (log "GraphQL websocket error" instance-name e)))
 
 (re-frame/reg-event-fx
  ::reconnect-ws
@@ -179,10 +201,14 @@
    (when-not (get-in db [:websocket :ready?])
      {::connect-ws [instance-name (get-in db [:websocket :url])]})))
 
+(defn new-websocket [url name]
+  #?(:cljs (js/WebSocket. url name)
+     :clj url))
+
 (re-frame/reg-fx
  ::connect-ws
  (fn [[instance-name ws-url]]
-   (let [ws (js/WebSocket. ws-url "graphql-ws")]
+   (let [ws (new-websocket ws-url "graphql-ws")]
      (aset ws "onmessage" (on-ws-message instance-name))
      (aset ws "onopen" (on-open instance-name ws))
      (aset ws "onclose" (on-close instance-name))
@@ -194,10 +220,12 @@
    (.close ws)))
 
 (defn default-ws-url []
-  (when (exists? (.-location js/window))
-    (let [host-and-port (.-host js/window.location)
-          ssl? (re-find #"^https" (.-origin js/window.location))]
-      (str (if ssl? "wss" "ws") "://" host-and-port "/graphql-ws"))))
+  #?(:cljs
+     (when (exists? (.-location js/window))
+       (let [host-and-port (.-host js/window.location)
+             ssl? (re-find #"^https" (.-origin js/window.location))]
+         (str (if ssl? "wss" "ws") "://" host-and-port "/graphql-ws")))
+     :clj "???"))
 
 (defn generate-query-id []
-  (.substr (.toString (js/Math.random) 36) 2 8))
+  (.substr (.toString (Math/random) 36) 2 8))
